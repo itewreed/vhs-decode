@@ -230,6 +230,27 @@ def main(args=None, use_gui=False):
         help="Disable diff demod",
     )
     luma_group.add_argument(
+        "--auto_rf_eq",
+        dest="auto_rf_eq",
+        action="store_true",
+        default=False,
+        help=(
+            "Measure the frequency response of the playback channel (tape, heads, deck, capture)"
+            " from the RF at the start position and adapt the RF filter to it. Currently PAL VHS only."
+        ),
+    )
+    luma_group.add_argument(
+        "--auto_rf_eq_target",
+        dest="auto_rf_eq_target",
+        default="reference",
+        choices=["reference", "flat"],
+        help=(
+            "Target response for --auto_rf_eq."
+            "\n  reference [default] correct for the difference to the typical response the fixed filters are tuned for"
+            "\n  flat      replace the fixed RF EQ with the inverse of the measured response (experimental)"
+        ),
+    )
+    luma_group.add_argument(
         "--fm_audio_notch",
         dest="fm_audio_notch",
         action="store",
@@ -771,6 +792,9 @@ def main(args=None, use_gui=False):
         vhsd.roughseek(args.start_fileloc, False)
     else:
         vhsd.roughseek(firstframe * 2)
+
+    if args.auto_rf_eq:
+        vhsd.adapt_rf_eq(args.auto_rf_eq_target)
 
     if system == "NTSC" and not args.ntscj:
         vhsd.blackIRE = 7.5
