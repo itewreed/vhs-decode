@@ -189,6 +189,7 @@ def comb_c_ntsc(data, line_len):
     'I': numba.float64,
     'Q': numba.float64,
     'phase_rotation': numba.int8,
+    'phase_correction': numba.float64,
 })
 class BurstInfo:
     line_number: int
@@ -203,6 +204,7 @@ class BurstInfo:
     I: float
     Q: float
     phase_rotation: int
+    phase_correction: float
 
     def __init__(
         self,
@@ -230,6 +232,7 @@ class BurstInfo:
         self.I = I
         self.Q = Q
         self.phase_rotation = -1 # this is set later
+        self.phase_correction = 0.0 # radians, fine heterodyne phase shift on top of phase_rotation
 
 
 @njit(nogil=True, inline='always')
@@ -593,8 +596,37 @@ def _fit_head_switch_rotation(
         return chroma_rotation_index
 
     switch, start_phase = best
-    for step, idx in enumerate(range(region_start + switch, line_count)):
-        next_phase = (start_phase + next_track_rotation * step) % 4
+    phases = rotation[region_start:].copy()
+    phases[switch:] = (start_phase + next_track_rotation * np.arange(region_len - switch)) % 4
+
+    # Lines right at the switch do not always follow either track (mid-line switch,
+    # transients of the new head), use their own burst there if it is clearly off.
+    def phase_error(k):
+        return np.abs((unrotated - k * (np.pi / 2) - expected + np.pi) % (2 * np.pi) - np.pi)
+
+    strong = weight >= 0.5
+    for j in range(max(0, switch - 2), region_len):
+        if strong[j] and phase_error(phases[j])[j] > np.radians(67.5):
+            errors = [phase_error(k)[j] for k in range(4)]
+            if min(errors) < np.radians(45):
+                phases[j] = int(np.argmin(errors))
+
+    # The new head often has a fixed chroma phase offset to the old one (not a multiple
+    # of 90 degrees), which shows as a hue change at the bottom of every other field.
+    following = np.arange(switch, region_len)
+    following = following[strong[following]]
+    phase_correction = 0.0
+    if len(following) >= 2:
+        residual = unrotated[following] - phases[following] * (np.pi / 2) - expected[following]
+        phase_correction = np.angle(np.sum(weight[following] * np.exp(1j * residual)))
+        if abs(phase_correction) < np.radians(3):
+            phase_correction = 0.0
+
+    for j in range(max(0, switch - 2), region_len):
+        idx = region_start + j
+        next_phase = int(phases[j])
+        if next_phase == rotation[idx] and j < switch:
+            continue
         burst = _get_upconverted_burst(
             chroma,
             chroma_heterodyne,
@@ -609,6 +641,8 @@ def _fit_head_switch_rotation(
             fsc,
         )
         burst.phase_rotation = next_phase
+        if j >= switch:
+            burst.phase_correction = phase_correction
         phase_sequence[idx] = burst
 
     return next_rotation_index
@@ -946,7 +980,15 @@ def upconvert_chroma(
 
         heterodyne = chroma_heterodyne[burst.phase_rotation][linestart:lineend]
         c = chroma[linestart:lineend]
-        uphet[linestart:lineend] = c * heterodyne
+        if burst.phase_correction != 0.0:
+            # the next heterodyne phase is 90 degrees further, mix both for the fractional step
+            quadrature = chroma_heterodyne[(burst.phase_rotation + 1) % 4][linestart:lineend]
+            uphet[linestart:lineend] = c * (
+                heterodyne * math.cos(burst.phase_correction)
+                + quadrature * math.sin(burst.phase_correction)
+            )
+        else:
+            uphet[linestart:lineend] = c * heterodyne
 
 
 @njit(nogil=True, cache=False, fastmath=False)
