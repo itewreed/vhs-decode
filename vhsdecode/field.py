@@ -1158,6 +1158,28 @@ class FieldShared:
 
         return dsout, dsaudio, dsefm
 
+    def _downscale_luma_and_chroma(self, luma_downscale, final, args, kwargs, **chroma_kwargs):
+        """Run the luma downscale and the chroma decode of this field.
+
+        Both only read the field's demodulated data and the shared TBC line
+        locations, so with threading enabled the chroma decode runs in the
+        processing pool while this thread does the luma.
+        """
+        pool = self.rf._processing_thread_pool if self.rf.parallel_field_processing else None
+        if pool is None:
+            dsout, dsaudio, dsefm = luma_downscale(final=final, *args, **kwargs)
+            return dsout, decode_chroma(self, **chroma_kwargs), dsaudio, dsefm
+
+        # Compute the shared pixel locations up front instead of in both threads.
+        self.prepare_downscale()
+        chroma_future = pool.submit(decode_chroma, self, **chroma_kwargs)
+        try:
+            dsout, dsaudio, dsefm = luma_downscale(final=final, *args, **kwargs)
+        finally:
+            # Always wait so the chroma task never outlives a failed luma pass.
+            dschroma = chroma_future.result()
+        return dsout, dschroma, dsaudio, dsefm
+
     def _get_line0_fallback(self, valid_pulses):
         expected_line0 = None
         expected_first_field = None
@@ -2325,8 +2347,9 @@ class FieldPALVHS(FieldPALShared):
         super(FieldPALVHS, self).__init__(*args, **kwargs)
 
     def downscale(self, final=False, *args, **kwargs):
-        dsout, dsaudio, dsefm = super(FieldPALVHS, self).downscale(final=final, *args, **kwargs)
-        dschroma = decode_chroma(self)
+        dsout, dschroma, dsaudio, dsefm = self._downscale_luma_and_chroma(
+            super(FieldPALVHS, self).downscale, final, args, kwargs
+        )
 
         return (dsout, dschroma), dsaudio, dsefm
 
@@ -2343,8 +2366,9 @@ class FieldPALUMatic(FieldPALShared):
         super(FieldPALUMatic, self).__init__(*args, **kwargs)
 
     def downscale(self, final=False, *args, **kwargs):
-        dsout, dsaudio, dsefm = super(FieldPALUMatic, self).downscale(final=final, *args, **kwargs)
-        dschroma = decode_chroma(self)
+        dsout, dschroma, dsaudio, dsefm = self._downscale_luma_and_chroma(
+            super(FieldPALUMatic, self).downscale, final, args, kwargs
+        )
 
         return (dsout, dschroma), dsaudio, dsefm
 
@@ -2354,9 +2378,9 @@ class FieldPALBetamax(FieldPALShared):
         super(FieldPALBetamax, self).__init__(*args, **kwargs)
 
     def downscale(self, final=False, *args, **kwargs):
-        dsout, dsaudio, dsefm = super(FieldPALBetamax, self).downscale(final=final, *args, **kwargs)
-
-        dschroma = decode_chroma(self)
+        dsout, dschroma, dsaudio, dsefm = self._downscale_luma_and_chroma(
+            super(FieldPALBetamax, self).downscale, final, args, kwargs
+        )
 
         return (dsout, dschroma), dsaudio, dsefm
 
@@ -2366,9 +2390,9 @@ class FieldPALVideo8(FieldPALShared):
         super(FieldPALVideo8, self).__init__(*args, **kwargs)
 
     def downscale(self, final=False, *args, **kwargs):
-        dsout, dsaudio, dsefm = super(FieldPALVideo8, self).downscale(final=final, *args, **kwargs)
-
-        dschroma = decode_chroma(self, do_chroma_deemphasis=True)
+        dsout, dschroma, dsaudio, dsefm = self._downscale_luma_and_chroma(
+            super(FieldPALVideo8, self).downscale, final, args, kwargs, do_chroma_deemphasis=True
+        )
 
         return (dsout, dschroma), dsaudio, dsefm
 
@@ -2389,9 +2413,9 @@ class FieldNTSCVHS(FieldNTSCShared):
 
     def downscale(self, final=False, *args, **kwargs):
         """Downscale the channels and upconvert chroma to standard color carrier frequency."""
-        dsout, dsaudio, dsefm = super(FieldNTSCVHS, self).downscale(final=final, *args, **kwargs)
-
-        dschroma = decode_chroma(self)
+        dsout, dschroma, dsaudio, dsefm = self._downscale_luma_and_chroma(
+            super(FieldNTSCVHS, self).downscale, final, args, kwargs
+        )
 
         return (dsout, dschroma), dsaudio, dsefm
 
@@ -2408,11 +2432,9 @@ class FieldNTSCBetamax(FieldNTSCShared):
         super(FieldNTSCBetamax, self).__init__(*args, **kwargs)
 
     def downscale(self, final=False, *args, **kwargs):
-        dsout, dsaudio, dsefm = super(FieldNTSCBetamax, self).downscale(
-            final=final, *args, **kwargs
+        dsout, dschroma, dsaudio, dsefm = self._downscale_luma_and_chroma(
+            super(FieldNTSCBetamax, self).downscale, final, args, kwargs
         )
-
-        dschroma = decode_chroma(self)
 
         return (dsout, dschroma), dsaudio, dsefm
 
@@ -2427,8 +2449,9 @@ class FieldNTSCUMatic(FieldNTSCShared):
         super(FieldNTSCUMatic, self).__init__(*args, **kwargs)
 
     def downscale(self, final=False, *args, **kwargs):
-        dsout, dsaudio, dsefm = super(FieldNTSCUMatic, self).downscale(final=final, *args, **kwargs)
-        dschroma = decode_chroma(self)
+        dsout, dschroma, dsaudio, dsefm = self._downscale_luma_and_chroma(
+            super(FieldNTSCUMatic, self).downscale, final, args, kwargs
+        )
 
         return (dsout, dschroma), dsaudio, dsefm
 
@@ -2449,9 +2472,9 @@ class FieldNTSCVideo8(FieldNTSCShared):
 
     def downscale(self, final=False, *args, **kwargs):
         """Downscale the channels and upconvert chroma to standard color carrier frequency."""
-        dsout, dsaudio, dsefm = super(FieldNTSCVideo8, self).downscale(final=final, *args, **kwargs)
-
-        dschroma = decode_chroma(self, do_chroma_deemphasis=True)
+        dsout, dschroma, dsaudio, dsefm = self._downscale_luma_and_chroma(
+            super(FieldNTSCVideo8, self).downscale, final, args, kwargs, do_chroma_deemphasis=True
+        )
 
         return (dsout, dschroma), dsaudio, dsefm
 
@@ -2461,8 +2484,9 @@ class FieldMESECAMVHS(FieldPALShared):
         super(FieldMESECAMVHS, self).__init__(*args, **kwargs)
 
     def downscale(self, final=False, *args, **kwargs):
-        dsout, dsaudio, dsefm = super(FieldMESECAMVHS, self).downscale(final=final, *args, **kwargs)
-        dschroma = decode_chroma(self)
+        dsout, dschroma, dsaudio, dsefm = self._downscale_luma_and_chroma(
+            super(FieldMESECAMVHS, self).downscale, final, args, kwargs
+        )
 
         return (dsout, dschroma), dsaudio, dsefm
 
@@ -2472,7 +2496,8 @@ class FieldSECAMVHS(FieldPALShared):
         super(FieldSECAMVHS, self).__init__(*args, **kwargs)
 
     def downscale(self, final=False, *args, **kwargs):
-        dsout, dsaudio, dsefm = super(FieldSECAMVHS, self).downscale(final=final, *args, **kwargs)
-        dschroma = decode_chroma(self)
+        dsout, dschroma, dsaudio, dsefm = self._downscale_luma_and_chroma(
+            super(FieldSECAMVHS, self).downscale, final, args, kwargs
+        )
 
         return (dsout, dschroma), dsaudio, dsefm
