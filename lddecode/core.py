@@ -28,7 +28,7 @@ from . import efm_pll
 from . import ac3rf
 from .utils import ldf_pipe, traceback
 from .utils import nb_mean, nb_median, nb_round, nb_min, nb_max, nb_abs, nb_absmax, n_orgt
-from .utils import polar2z, sqsum, genwave, dsa_rescale_and_clip, scale, scale_field, rms
+from .utils import polar2z, sqsum, genwave, dsa_rescale_and_clip, scale, compute_level_adjusts, scale_field_adjusted, rms
 from .utils import findpeaks, findpulses, calczc, inrange, roundfloat
 from .utils import LRUupdate, clb_findbursts, angular_mean_helper, phase_distance
 from .utils import build_hilbert, unwrap_hilbert, emphasis_iir, filtfft
@@ -1773,6 +1773,8 @@ class Field:
 
         self.interpolated_pixel_locs = None
         self.wowfactors = None
+        self._wow_cache_key = None
+        self._level_adjusts = None
 
         # On NTSC linecount rounds up to 263, and PAL 313
         self.outlinecount = (self.rf.SysParams["frame_lines"] // 2) + 1
@@ -2744,6 +2746,19 @@ class Field:
            and scale input samples to output samples
         """
         actual_linelocs = np.array(self.linelocs, dtype=np.float64)
+
+        # Luma and chroma are TBC'd with the same line locations, so reuse the
+        # result instead of rebuilding and evaluating the spline for every channel.
+        cache_key = (
+            actual_linelocs.tobytes(),
+            self.lineoffset,
+            self.outlinecount,
+            self.outlinelen,
+            self.wow_interpolation_method,
+        )
+        if cache_key == self._wow_cache_key:
+            return self.interpolated_pixel_locs, self.wowfactors
+
         expected_linelocs = np.array([i * self.inlinelen for i in range(len(actual_linelocs))], dtype=np.float64)
 
         outscale = self.inlinelen / self.outlinelen
@@ -2770,6 +2785,8 @@ class Field:
         self.interpolated_pixel_locs = spl(scaled_pixel_locs)
         # amount of wow for each scaled pixel
         self.wowfactors = spl(scaled_pixel_locs, 1)
+        self._wow_cache_key = cache_key
+        self._level_adjusts = None
 
         return self.interpolated_pixel_locs, self.wowfactors
 
@@ -2842,16 +2859,21 @@ class Field:
 
         dsout = np.zeros((linesout * outwidth), dtype=np.float32)
         interpolated_pixel_locs, wowfactors = self.computewow_scaled()
-        scale_field(
+        level_adjust_key = (outwidth, self.wow_level_adjust_smoothing)
+        if self._level_adjusts is None or self._level_adjusts[0] != level_adjust_key:
+            self._level_adjusts = (
+                level_adjust_key,
+                compute_level_adjusts(wowfactors, outwidth, self.wow_level_adjust_smoothing),
+            )
+        scale_field_adjusted(
             self.data["video"][channel].astype(np.float32, copy=False),
             dsout,
             interpolated_pixel_locs,
-            wowfactors,
+            self._level_adjusts[1],
             self.rf.downscale_sinc_lut,
             self.lineoffset,
             outwidth,
-            wow_level_adjust_smoothing=self.wow_level_adjust_smoothing,
-            shift=shift
+            shift
         )
 
         if self.rf.decode_digital_audio:
