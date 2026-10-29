@@ -406,7 +406,7 @@ def _tune_burst_measurements(
         if (abs(delta_A) < max_precision) and \
            (abs(delta_phi) < max_precision) and \
            (abs(delta_dc) < max_precision) and \
-           (abs(delta_f) < max_precision):
+           (abs(delta_f) < max_precision * f):
             break
 
     phi = (phi + np.pi) % (2 * np.pi) - np.pi
