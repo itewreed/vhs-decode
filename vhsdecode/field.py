@@ -1094,9 +1094,10 @@ class FieldShared:
                             )
                             hz_ire = self.rf.DecoderParams["hz_ire"]
 
-                if self.rf.track_phase is not None:
+                track_phase = getattr(self, "output_track_phase", self.rf.track_phase)
+                if track_phase is not None:
                     ire0 += self.rf.DecoderParams["track_ire0_offset"][
-                        self.rf.track_phase ^ (self.field_number % 2)
+                        track_phase ^ (self.field_number % 2)
                     ]
 
                 return hz_to_output_array(
@@ -1123,6 +1124,10 @@ class FieldShared:
 
     def lock_to_burst(self):
         self.chroma_tbc_buffer = None
+        # rf.track_phase is advanced here for the next field, possibly while the
+        # main thread is still writing out the previous one, so keep the value
+        # this field was decoded with for hz_to_output.
+        self.output_track_phase = self.rf.track_phase if self.rf.track_phase is not None else 0
         (
             self.rf.track_phase,
             self.phase_sequence,
