@@ -8,7 +8,6 @@ from vhsdecode.rust_utils import sosfiltfilt_rust
 
 import numba
 from numba import njit
-from numba.experimental import jitclass
 from functools import cache
 
 
@@ -27,17 +26,19 @@ def chroma_to_u16(chroma):
         
     return out
 
-@njit(cache=False, nogil=True, fastmath=True)
+@njit(cache=True, nogil=True, fastmath=True)
 def chroma_automatic_gain(
     chroma,
     burst_abs_ref,
-    phase_sequence,
+    burst_line_numbers,
+    burst_starts,
+    burst_amplitudes,
     burst_detected_line,
     sync_tip_len,
     smoothing_window=8,
     k=2.0
 ):
-    burst_count = len(phase_sequence)
+    burst_count = len(burst_line_numbers)
 
     raw_gains = np.empty(burst_count, dtype=np.float64)
     valid_gains = np.empty(burst_count, dtype=np.float64)
@@ -46,13 +47,12 @@ def chroma_automatic_gain(
 
     # extract gain values and track valid amplitudes
     for i in range(burst_count):
-        current_burst = phase_sequence[i]
-        current_amp = current_burst.amplitude if current_burst.amplitude != 0 else 1e-8
+        current_amp = burst_amplitudes[i] if burst_amplitudes[i] != 0 else 1e-8
 
         raw_gain = burst_abs_ref / current_amp
         raw_gains[i] = raw_gain
 
-        if current_burst.line_number >= burst_detected_line:
+        if burst_line_numbers[i] >= burst_detected_line:
             valid_gains[valid_count] = raw_gain
             valid_amps[valid_count] = current_amp
             valid_count += 1
@@ -81,15 +81,14 @@ def chroma_automatic_gain(
     noise_sum = 0
     noise_samples = 0
     for i in range(burst_count):
-        current_burst = phase_sequence[i]
-        current_burst_start = current_burst.start
+        current_burst_start = burst_starts[i]
 
         if i < burst_count - 1:
-            next_burst_start = phase_sequence[i + 1].start
+            next_burst_start = burst_starts[i + 1]
         else:
             next_burst_start = len(chroma)
 
-        if current_burst.line_number < burst_detected_line:
+        if burst_line_numbers[i] < burst_detected_line:
             chroma[current_burst_start:next_burst_start] = 0.0
         else:
             gain_start = smoothed_gains[i]
@@ -176,33 +175,25 @@ def comb_c_ntsc(data, line_len):
     return data
 
 
-@jitclass({
-    'line_number': numba.int32,
-    'start': numba.int32,
-    'end': numba.int32,
-    'phase_deg': numba.float64,
-    'phase_offset_deg': numba.float64,
-    'amplitude': numba.float64,
-    'magnitude': numba.float64,
-    'frequency': numba.float64,
-    'dc': numba.float64,
-    'I': numba.float64,
-    'Q': numba.float64,
-    'phase_rotation': numba.int8,
-})
 class BurstInfo:
-    line_number: int
-    start: int
-    end: int
-    center: int
-    phase_deg: float
-    amplitude: float
-    magnitude: float
-    frequency: float
-    dc: float
-    I: float
-    Q: float
-    phase_rotation: int
+    # Plain Python class instead of a numba jitclass: jitclass arguments block
+    # caching of every njit function they are passed to. The numba kernels below
+    # take the fields as arrays from burst_info_arrays() instead.
+    __slots__ = (
+        "line_number",
+        "start",
+        "end",
+        "center",
+        "phase_deg",
+        "phase_offset_deg",
+        "amplitude",
+        "magnitude",
+        "frequency",
+        "dc",
+        "I",
+        "Q",
+        "phase_rotation",
+    )
 
     def __init__(
         self,
@@ -218,18 +209,39 @@ class BurstInfo:
         I,
         Q
     ):
-        self.line_number = line_number
-        self.start = burst_start
-        self.end = burst_end
-        self.center = burst_center
-        self.phase_deg = burst_phase_deg
-        self.amplitude = burst_amplitude
-        self.magnitude = burst_magnitude
-        self.dc = burst_dc
-        self.frequency = burst_frequency
-        self.I = I
-        self.Q = Q
+        self.line_number = int(line_number)
+        self.start = int(burst_start)
+        self.end = int(burst_end)
+        # truncated to an integer sample position, as the former jitclass did
+        self.center = int(burst_center)
+        self.phase_deg = float(burst_phase_deg)
+        self.phase_offset_deg = 0.0
+        self.amplitude = float(burst_amplitude)
+        self.magnitude = float(burst_magnitude)
+        self.dc = float(burst_dc)
+        self.frequency = float(burst_frequency)
+        self.I = float(I)
+        self.Q = float(Q)
         self.phase_rotation = -1 # this is set later
+
+
+def burst_info_arrays(phase_sequence):
+    """Pack the fields used by the numba kernels into arrays:
+    (line_number, start, phase_rotation, amplitude, frequency, phase_deg, dc)"""
+    n = len(phase_sequence)
+    line_number = np.empty(n, dtype=np.int64)
+    start = np.empty(n, dtype=np.int64)
+    phase_rotation = np.empty(n, dtype=np.int64)
+    values = np.empty((4, n), dtype=np.float64)
+    for i, burst in enumerate(phase_sequence):
+        line_number[i] = burst.line_number
+        start[i] = burst.start
+        phase_rotation[i] = burst.phase_rotation
+        values[0, i] = burst.amplitude
+        values[1, i] = burst.frequency
+        values[2, i] = burst.phase_deg
+        values[3, i] = burst.dc
+    return line_number, start, phase_rotation, values[0], values[1], values[2], values[3]
 
 
 @njit(nogil=True, inline='always')
@@ -791,30 +803,35 @@ def get_phase_rotation_sequence(
     return chroma_rotation_index, phase_sequence, burst_detected_line, burst_magnitude_avg, burst_phase_avg, even_burst_phase_avg, odd_burst_phase_avg
 
 
-@njit(cache=False, nogil=True, fastmath=False)
+@njit(cache=True, nogil=True, fastmath=False)
 def upconvert_chroma(
     chroma,
     uphet,
     lineoffset,
     outwidth,
-    phase_rotation_sequence,
+    burst_line_numbers,
+    burst_phase_rotations,
     chroma_heterodyne,
 ):
-    for burst in phase_rotation_sequence:
-        linestart = (burst.line_number - lineoffset) * outwidth
+    for i in range(len(burst_line_numbers)):
+        linestart = (burst_line_numbers[i] - lineoffset) * outwidth
         lineend = linestart + outwidth
 
-        heterodyne = chroma_heterodyne[burst.phase_rotation][linestart:lineend]
+        heterodyne = chroma_heterodyne[burst_phase_rotations[i]][linestart:lineend]
         c = chroma[linestart:lineend]
         uphet[linestart:lineend] = c * heterodyne
 
 
-@njit(nogil=True, cache=False, fastmath=False)
+@njit(nogil=True, cache=True, fastmath=False)
 def upconvert_chroma_phase_comp(
     chroma,
     lineoffset,
     outwidth,
-    phase_rotation_sequence,
+    burst_line_numbers,
+    burst_phase_rotations,
+    burst_frequencies,
+    burst_phase_degs,
+    burst_dcs,
     color_under_carrier_fs,
     fsc,
     target_phase_even,
@@ -829,7 +846,7 @@ def upconvert_chroma_phase_comp(
 
     target_phase_even_rad = target_phase_even * deg2rad_scale
     target_phase_odd_rad = target_phase_odd * deg2rad_scale
-    num_bursts = len(phase_rotation_sequence)
+    num_bursts = len(burst_line_numbers)
 
     coeff_step_factor = pi_over_two / (fsc * outwidth)
 
@@ -838,41 +855,38 @@ def upconvert_chroma_phase_comp(
     local_idx = np.arange(outwidth, dtype=np.float64)
 
     for idx in range(num_bursts):
-        current_burst = phase_rotation_sequence[idx]
-
         # Solve for current line's active het_hz
-        k_current = current_burst.frequency / fsc
+        k_current = burst_frequencies[idx] / fsc
         het_hz_current = k_current * color_under_carrier_fs
 
         # Solve for next line's active het_hz
         if idx < num_bursts - 1:
-            next_burst = phase_rotation_sequence[idx + 1]
-            k_next = next_burst.frequency / fsc
+            k_next = burst_frequencies[idx + 1] / fsc
             het_hz_next = k_next * color_under_carrier_fs
         else:
             het_hz_next = het_hz_current
 
-        linestart = (current_burst.line_number - lineoffset) * outwidth
+        linestart = (burst_line_numbers[idx] - lineoffset) * outwidth
         lineend = linestart + outwidth
 
         # Determine target phase
-        if current_burst.line_number % 2 != 0:
+        if burst_line_numbers[idx] % 2 != 0:
             target_phase_rad = target_phase_odd_rad
         else:
             target_phase_rad = target_phase_even_rad
 
         # Initial starting phase
         theta_0 = het_coefficient * linestart + (
-            current_burst.phase_rotation * pi_over_two
+            burst_phase_rotations[idx] * pi_over_two
             + target_phase_rad 
-            + current_burst.phase_deg * deg2rad_scale
+            + burst_phase_degs[idx] * deg2rad_scale
         )
 
         # Coefficient step parameters
         alpha = pi_over_two * (1.0 + het_hz_current / fsc)
         delta_coeff = (het_hz_next - het_hz_current) * coeff_step_factor
         beta = 0.5 * delta_coeff
-        dc_val = current_burst.dc
+        dc_val = burst_dcs[idx]
 
         # Slice target and source arrays to provide direct contiguous memory views
         chroma_slice = chroma[linestart:lineend]
@@ -1901,6 +1915,16 @@ def process_chroma(
             field, chroma, linesout, outwidth, burstarea
         )
 
+    (
+        burst_line_numbers,
+        burst_starts,
+        burst_phase_rotations,
+        burst_amplitudes,
+        burst_frequencies,
+        burst_phase_degs,
+        burst_dcs,
+    ) = burst_info_arrays(field.phase_sequence)
+
     # For NTSC, the color burst amplitude is doubled when recording, so we have to undo that.
     if field.rf.color_system == "NTSC":
         if not disable_deemph:
@@ -1928,7 +1952,11 @@ def process_chroma(
             chroma, # modifies this in place
             lineoffset,
             outwidth,
-            field.phase_sequence,
+            burst_line_numbers,
+            burst_phase_rotations,
+            burst_frequencies,
+            burst_phase_degs,
+            burst_dcs,
             field.rf.DecoderParams["color_under_carrier"],
             field.rf.SysParams["fsc_mhz"] * 1e6,
             target_phase_even,
@@ -1968,7 +1996,8 @@ def process_chroma(
             uphet,
             lineoffset,
             outwidth,
-            field.phase_sequence,
+            burst_line_numbers,
+            burst_phase_rotations,
             chroma_heterodyne
         )
 
@@ -2007,7 +2036,9 @@ def process_chroma(
     mean_rms, chroma_noise_floor = chroma_automatic_gain(
         uphet,
         field.rf.SysParams["burst_abs_ref"],
-        field.phase_sequence,
+        burst_line_numbers,
+        burst_starts,
+        burst_amplitudes,
         field.burst_detected_line,
         math.floor(field.usectooutpx(field.rf.SysParams["hsyncPulseUS"]))
     )
