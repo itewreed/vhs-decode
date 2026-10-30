@@ -13,7 +13,9 @@ CXADC_FREQ_HIGH = 3150.0 / 88.0  # 35.795454545
 CXADC_TENBIT_FREQ = (8 * 315.0) / 88.0 / 2.0  # 14.318181818
 CXADC_TENBIT_FREQ_HIGH = 3150.0 / 88.0 / 2.0  # 17.897727272
 
-DEFAULT_THREADS = 4
+# Measured on 4- and 16-thread machines: 2-3 threads are fastest, more
+# threads slow the decode down because the per-field stages are serial.
+DEFAULT_THREADS = 3
 DEFAULT_INPUT_FILENAME = ""
 DEFAULT_OUTPUT_FILENAME = ""
 
@@ -163,7 +165,7 @@ def common_parser_gui(meta_title):
     return common_parser_gui_inner(meta_title)
 
 
-def common_parser_cli(meta_title, default_threads=DEFAULT_THREADS + 1):
+def common_parser_cli(meta_title, default_threads=DEFAULT_THREADS):
     parser = argparse.ArgumentParser(
         description=meta_title, formatter_class=argparse.RawTextHelpFormatter
     )

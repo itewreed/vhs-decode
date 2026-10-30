@@ -229,7 +229,7 @@ sinc_phase_count = 2**16
 
 
 @njit(nogil=True, cache=True, fastmath=True)
-def scale_field(buf, dsout, interpolated_pixel_locs, wowfactors, sinc_lut, lineoffset, outwidth, wow_level_adjust_smoothing = 0, level_adjust_threshold = 15, shift: float = 0.0):
+def compute_level_adjusts(wowfactors, outwidth, wow_level_adjust_smoothing = 0, level_adjust_threshold = 15):
     # average out any unusual spikes in wow that happen on a per line basis
     # this indicates an hsync tbc error vs. being normal wow from playback speed variations
     # in this case for level adjusting we just want to fallback to the average wow to avoid a bright or dark line
@@ -252,6 +252,11 @@ def scale_field(buf, dsout, interpolated_pixel_locs, wowfactors, sinc_lut, lineo
         for i in range(1, len(level_adjusts)):
             level_adjusts[i] = alpha * level_adjusts[i] + one_minus_alpha * level_adjusts[i-1]
 
+    return level_adjusts
+
+
+@njit(nogil=True, cache=True, fastmath=True)
+def scale_field_adjusted(buf, dsout, interpolated_pixel_locs, level_adjusts, sinc_lut, lineoffset, outwidth, shift: float = 0.0):
     half_taps_m1 = (sinc_tap_count // 2) - 1
 
     dsout_start = outwidth * (lineoffset + 1)
@@ -283,6 +288,39 @@ def scale_field(buf, dsout, interpolated_pixel_locs, wowfactors, sinc_lut, lineo
             result += buf[start + t] * w[t]
 
         dsout[i - dsout_start] = level_adjust * result
+
+
+@njit(nogil=True, cache=True, fastmath=True)
+def scale_field_pixels(buf, dsout, pixels, pixel_locs, level_adjusts, sinc_lut, dsout_start, shift: float = 0.0):
+    """scale_field_adjusted() for a subset of output pixels: pixels holds their
+    indices (offset by dsout_start like in scale_field_adjusted), pixel_locs the
+    interpolated input location of each of them."""
+    half_taps_m1 = (sinc_tap_count // 2) - 1
+
+    for n in range(len(pixels)):
+        i = pixels[n]
+        level_adjust = level_adjusts[i]
+
+        coord = np.float32(pixel_locs[n] + shift)
+        coord_int = int(coord)
+
+        frac = coord - coord_int
+
+        phase = int(frac * sinc_phase_count + np.float32(0.5))
+        w = sinc_lut[phase]
+
+        start = coord_int - half_taps_m1
+
+        result = 0.0
+        for t in range(sinc_tap_count):
+            result += buf[start + t] * w[t]
+
+        dsout[i - dsout_start] = level_adjust * result
+
+
+def scale_field(buf, dsout, interpolated_pixel_locs, wowfactors, sinc_lut, lineoffset, outwidth, wow_level_adjust_smoothing = 0, level_adjust_threshold = 15, shift: float = 0.0):
+    level_adjusts = compute_level_adjusts(wowfactors, outwidth, wow_level_adjust_smoothing, level_adjust_threshold)
+    scale_field_adjusted(buf, dsout, interpolated_pixel_locs, level_adjusts, sinc_lut, lineoffset, outwidth, shift)
 
 
 frequency_suffixes = [

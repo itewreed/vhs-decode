@@ -443,6 +443,13 @@ class VHSDecode(ldd.LDdecode):
             )
             return None
 
+    def _snapshot_field_decode_state(self):
+        """Freeze state the main thread keeps updating while it processes the
+        current field, so the next field's decode (run in parallel) sees the same
+        values as in single-threaded mode, where it runs first."""
+        if self.rf.do_cafc:
+            self.rf.phase_detect_chroma_het = self.rf.chroma_afc.getChromaHet()
+
     def readfield(self, initphase=False):
         done = False
         adjusted = False
@@ -464,8 +471,13 @@ class VHSDecode(ldd.LDdecode):
                 self.second_decode = time.time()
 
             if redo:
-                # Drop existing thread
+                # The speculative decode of the next field may still be running and
+                # shares the demod cache and decoder state with this redo, so wait
+                # for it before re-decoding (its result is discarded).
+                if self.decodethread and self.decodethread.ident:
+                    self.decodethread.join()
                 self.decodethread = None
+                self._snapshot_field_decode_state()
 
                 f, offset = self.decodefield(
                     redo, self.mtf_level, self.fieldstack[0], initphase, redo
@@ -506,6 +518,7 @@ class VHSDecode(ldd.LDdecode):
             )
 
             # decode the next field in a thread so the result is ready for the next iteration
+            self._snapshot_field_decode_state()
             if self.numthreads != 0:
                 self.decodethread = threading.Thread(
                     target=self.decodefield, args=df_args
@@ -952,6 +965,9 @@ class VHSRFDecode(ldd.RFDecode):
 
         # Long-term average of the measured ME-SECAM rest carrier pair offset,
         # used to trim the chroma up-conversion LO.
+        # Chroma AFC heterodyne as of the start of the current field decode, see
+        # VHSDecode._snapshot_field_decode_state.
+        self.phase_detect_chroma_het = None
         self.secam_servo_avg = utils.StackableMA(min_watermark=2, window_average=60)
         lo_trim_seed = rf_options.get("secam_lo_trim", None)
         if lo_trim_seed is not None and system == "MESECAM":
