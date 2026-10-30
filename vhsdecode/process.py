@@ -23,7 +23,12 @@ import vhsdecode.formats as vhs_formats
 from vhsdecode.addons.chromasep import ChromaSepClass
 from vhsdecode.addons.chromaAFC import ChromaAFC
 
-from vhsdecode.demod import replace_spikes, unwrap_hilbert, smooth_spikes
+from vhsdecode.demod import (
+    replace_spikes,
+    unwrap_hilbert,
+    smooth_spikes,
+    ColorUnderCrosstalkCanceller,
+)
 
 from vhsdecode.field import field_class_from_formats
 from vhsdecode.video_eq import VideoEQ
@@ -677,6 +682,9 @@ class VHSRFDecode(ldd.RFDecode):
         self._notch = rf_options.get("notch", None)
         self._notch_q = rf_options.get("notch_q", 10.0)
         self._disable_diff_demod = rf_options.get("disable_diff_demod", False)
+        self._cu_crosstalk_cancel = not rf_options.get(
+            "disable_cu_crosstalk_cancel", False
+        )
         self.useAGC = extra_options.get("useAGC", False)
         self.debug = extra_options.get("debug", False)
 
@@ -1058,6 +1066,14 @@ class VHSRFDecode(ldd.RFDecode):
 
         SF["hilbert"] = lddu.build_hilbert(self.blocklen)
 
+        self._cu_canceller = (
+            ColorUnderCrosstalkCanceller(
+                DP["color_under_carrier"], self.freq_hz, self.blocklen
+            )
+            if self.options.color_under and self._cu_crosstalk_cancel
+            else None
+        )
+
         if DP.get("video_bpf_supergauss", False):
             self.Filters["RFVideo"] = gen_bpf_supergauss(
                 DP["video_bpf_low"],
@@ -1313,6 +1329,13 @@ class VHSRFDecode(ldd.RFDecode):
         if self._notch is not None:
             indata_fft *= self.Filters["FVideoNotchF"]
 
+        # Colour-under reference band, taken before the RF filters remove it.
+        cu_ref_fft = (
+            indata_fft[self._cu_canceller.ref_bins]
+            if self._cu_canceller is not None
+            else None
+        )
+
         # Applies RF filters
         indata_fft *= self.Filters["RFVideo"]
 
@@ -1389,7 +1412,16 @@ class VHSRFDecode(ldd.RFDecode):
 
         # applies main deemphasis filter
         demod_fft = npfft.rfft(demod)
-        out_video_fft = demod_fft * self.Filters["FVideo"]
+        if cu_ref_fft is not None:
+            # Only applied to the luma output, sync detection (demod_05) keeps
+            # using the unmodified signal so line timing isn't affected.
+            video_fft = demod_fft.copy()
+            video_fft[self._cu_canceller.bins] -= (
+                self._cu_canceller.crosstalk_spectrum(demod_fft, cu_ref_fft)
+            )
+            out_video_fft = video_fft * self.Filters["FVideo"]
+        else:
+            out_video_fft = demod_fft * self.Filters["FVideo"]
         out_video = npfft.irfft(out_video_fft).real
 
         if self.options.nldeemp:

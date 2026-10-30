@@ -230,6 +230,13 @@ def main(args=None, use_gui=False):
         help="Disable diff demod",
     )
     luma_group.add_argument(
+        "--no_cu_crosstalk_cancel",
+        dest="disable_cu_crosstalk_cancel",
+        action="store_true",
+        default=False,
+        help="Disable removal of colour-under crosstalk (diagonal mesh pattern in saturated colours) from luma.",
+    )
+    luma_group.add_argument(
         "--fm_audio_notch",
         dest="fm_audio_notch",
         action="store",
@@ -627,6 +634,7 @@ def main(args=None, use_gui=False):
     rf_options["track_phase"] = args.track_phase
     rf_options["high_boost"] = args.high_boost
     rf_options["disable_diff_demod"] = args.disable_diff_demod
+    rf_options["disable_cu_crosstalk_cancel"] = args.disable_cu_crosstalk_cancel
     rf_options["fm_audio_notch"] = args.fm_audio_notch
     rf_options["disable_dc_offset"] = not args.enable_dc_offset
     rf_options["disable_comb"] = args.disable_comb
