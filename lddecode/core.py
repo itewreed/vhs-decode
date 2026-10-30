@@ -2790,21 +2790,6 @@ class Field:
 
         return self.interpolated_pixel_locs, self.wowfactors
 
-    def prepare_downscale(self, outwidth=None):
-        """Compute (or reuse) the pixel locations and level adjustments shared by all
-        channels TBC'd with the current line locations.  Calling this before
-        downscaling channels in parallel avoids computing them concurrently."""
-        if outwidth is None:
-            outwidth = self.outlinelen
-        interpolated_pixel_locs, wowfactors = self.computewow_scaled()
-        level_adjust_key = (outwidth, self.wow_level_adjust_smoothing)
-        if self._level_adjusts is None or self._level_adjusts[0] != level_adjust_key:
-            self._level_adjusts = (
-                level_adjust_key,
-                compute_level_adjusts(wowfactors, outwidth, self.wow_level_adjust_smoothing),
-            )
-        return interpolated_pixel_locs, self._level_adjusts[1]
-
     @profile
     def downscale(
         self,
@@ -2873,12 +2858,18 @@ class Field:
                 downscale_audio(*dsa_args)
 
         dsout = np.zeros((linesout * outwidth), dtype=np.float32)
-        interpolated_pixel_locs, level_adjusts = self.prepare_downscale(outwidth)
+        interpolated_pixel_locs, wowfactors = self.computewow_scaled()
+        level_adjust_key = (outwidth, self.wow_level_adjust_smoothing)
+        if self._level_adjusts is None or self._level_adjusts[0] != level_adjust_key:
+            self._level_adjusts = (
+                level_adjust_key,
+                compute_level_adjusts(wowfactors, outwidth, self.wow_level_adjust_smoothing),
+            )
         scale_field_adjusted(
             self.data["video"][channel].astype(np.float32, copy=False),
             dsout,
             interpolated_pixel_locs,
-            level_adjusts,
+            self._level_adjusts[1],
             self.rf.downscale_sinc_lut,
             self.lineoffset,
             outwidth,

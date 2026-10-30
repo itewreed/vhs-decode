@@ -151,7 +151,6 @@ class VHSDecode(ldd.LDdecode):
         # Store reference to ourself in the rf decoder - needed to access data location for track
         # phase, may want to do this in a better way later.
         self.rf.decoder = self
-        self.rf.parallel_field_processing = threads != 0
         self.FieldClass = field_class_from_formats(system, tape_format)
 
         # Restore init functino now that superclass constructor is finished.
@@ -652,8 +651,6 @@ class VHSRFDecode(ldd.RFDecode):
         if processing_thread_pool is None:
             processing_thread_pool = ThreadPoolExecutor(max_workers=1)
         self._processing_thread_pool = processing_thread_pool
-        # Set by VHSDecode: decode chroma in the pool alongside luma when threading.
-        self.parallel_field_processing = False
 
         # Store a separate setting for *color* system as opposed to 525/625 line here.
         # TODO: Fix upstream so we don't have to fake tell ld-decode code that we are using ntsc for
