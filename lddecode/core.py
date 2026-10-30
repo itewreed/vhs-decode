@@ -28,7 +28,7 @@ from . import efm_pll
 from . import ac3rf
 from .utils import ldf_pipe, traceback
 from .utils import nb_mean, nb_median, nb_round, nb_min, nb_max, nb_abs, nb_absmax, n_orgt
-from .utils import polar2z, sqsum, genwave, dsa_rescale_and_clip, scale, compute_level_adjusts, scale_field_adjusted, rms
+from .utils import polar2z, sqsum, genwave, dsa_rescale_and_clip, scale, compute_level_adjusts, scale_field_adjusted, scale_field_pixels, rms
 from .utils import findpeaks, findpulses, calczc, inrange, roundfloat
 from .utils import LRUupdate, clb_findbursts, angular_mean_helper, phase_distance
 from .utils import build_hilbert, unwrap_hilbert, emphasis_iir, filtfft
@@ -2759,6 +2759,20 @@ class Field:
         if cache_key == self._wow_cache_key:
             return self.interpolated_pixel_locs, self.wowfactors
 
+        spl, scaled_pixel_locs = self._wow_spline(actual_linelocs)
+
+        # interpolate the expected pixel location
+        self.interpolated_pixel_locs = spl(scaled_pixel_locs)
+        # amount of wow for each scaled pixel
+        self.wowfactors = spl(scaled_pixel_locs, 1)
+        self._wow_cache_key = cache_key
+        self._level_adjusts = None
+
+        return self.interpolated_pixel_locs, self.wowfactors
+
+    def _wow_spline(self, actual_linelocs):
+        """Return the spline mapping output to input sample positions, and the
+        scaled output pixel positions to evaluate it at."""
         expected_linelocs = np.array([i * self.inlinelen for i in range(len(actual_linelocs))], dtype=np.float64)
 
         outscale = self.inlinelen / self.outlinelen
@@ -2781,14 +2795,44 @@ class Field:
         # scale up to compute where the output pixel would fall on the interpolated line loc
         scaled_pixel_locs = np.arange(outsamples + outline_offset) * outscale
 
-        # interpolate the expected pixel location
-        self.interpolated_pixel_locs = spl(scaled_pixel_locs)
-        # amount of wow for each scaled pixel
-        self.wowfactors = spl(scaled_pixel_locs, 1)
-        self._wow_cache_key = cache_key
-        self._level_adjusts = None
+        return spl, scaled_pixel_locs
 
-        return self.interpolated_pixel_locs, self.wowfactors
+    def downscale_line_window(self, channel, window_end, outwidth=None, linesout=None):
+        """TBC only the first window_end output pixels of every line, leaving the
+        rest of the returned field zero. Each pixel gets the same value a full
+        downscale() would give it."""
+        if outwidth is None:
+            outwidth = self.outlinelen
+        if linesout is None:
+            linesout = self.outlinecount
+
+        actual_linelocs = np.array(self.linelocs, dtype=np.float64)
+        spl, scaled_pixel_locs = self._wow_spline(actual_linelocs)
+
+        # the level adjustment is derived from the wow of the whole field
+        wowfactors = spl(scaled_pixel_locs, 1)
+        level_adjusts = compute_level_adjusts(wowfactors, outwidth, self.wow_level_adjust_smoothing)
+
+        dsout_start = outwidth * (self.lineoffset + 1)
+        window_end = min(window_end, outwidth)
+        pixels = (
+            dsout_start
+            + np.arange(linesout)[:, None] * outwidth
+            + np.arange(window_end)[None, :]
+        ).ravel()
+
+        dsout = np.zeros((linesout * outwidth), dtype=np.float32)
+        scale_field_pixels(
+            self.data["video"][channel].astype(np.float32, copy=False),
+            dsout,
+            pixels,
+            spl(scaled_pixel_locs[pixels]),
+            level_adjusts,
+            self.rf.downscale_sinc_lut,
+            dsout_start,
+        )
+
+        return dsout
 
     @profile
     def downscale(

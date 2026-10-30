@@ -974,13 +974,17 @@ def decode_chroma_phase_rotation(
     chroma_rotation=None,
     detect_chroma_track_phase=False,
 ):
-    chroma, _, _ = ldd.Field.downscale(field, channel="demod_burst")
-
     lineoffset = field.lineoffset + 1
     linesout = field.outlinecount
     outwidth = field.outlinelen
 
     burstarea = get_burst_area(field)
+
+    # Only the burst and the filter padding before and after it are read from
+    # each line (see _get_upconverted_burst), so skip TBC for the rest.
+    chroma = field.downscale_line_window(
+        "demod_burst", burstarea[1] + burstarea[0], outwidth, linesout
+    )
     rotation_check_start_line = lineoffset + linesout - 16
 
     # Rotation per track

@@ -290,6 +290,34 @@ def scale_field_adjusted(buf, dsout, interpolated_pixel_locs, level_adjusts, sin
         dsout[i - dsout_start] = level_adjust * result
 
 
+@njit(nogil=True, cache=True, fastmath=True)
+def scale_field_pixels(buf, dsout, pixels, pixel_locs, level_adjusts, sinc_lut, dsout_start, shift: float = 0.0):
+    """scale_field_adjusted() for a subset of output pixels: pixels holds their
+    indices (offset by dsout_start like in scale_field_adjusted), pixel_locs the
+    interpolated input location of each of them."""
+    half_taps_m1 = (sinc_tap_count // 2) - 1
+
+    for n in range(len(pixels)):
+        i = pixels[n]
+        level_adjust = level_adjusts[i]
+
+        coord = np.float32(pixel_locs[n] + shift)
+        coord_int = int(coord)
+
+        frac = coord - coord_int
+
+        phase = int(frac * sinc_phase_count + np.float32(0.5))
+        w = sinc_lut[phase]
+
+        start = coord_int - half_taps_m1
+
+        result = 0.0
+        for t in range(sinc_tap_count):
+            result += buf[start + t] * w[t]
+
+        dsout[i - dsout_start] = level_adjust * result
+
+
 def scale_field(buf, dsout, interpolated_pixel_locs, wowfactors, sinc_lut, lineoffset, outwidth, wow_level_adjust_smoothing = 0, level_adjust_threshold = 15, shift: float = 0.0):
     level_adjusts = compute_level_adjusts(wowfactors, outwidth, wow_level_adjust_smoothing, level_adjust_threshold)
     scale_field_adjusted(buf, dsout, interpolated_pixel_locs, level_adjusts, sinc_lut, lineoffset, outwidth, shift)
