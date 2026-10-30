@@ -192,6 +192,22 @@ def get_rfparams_pal_vhs(rfparams_pal: dict, tape_speed: int = 0) -> dict:
     RFParams_PAL_VHS["video_rf_peak_gain"] = 4
     RFParams_PAL_VHS["video_rf_peak_bandwidth"] = 1.0e7
 
+    # Adaptive rf eq (--auto_rf_eq), see addons/adaptive_rf_eq.py
+    # Band used to extract the FM phase reference.
+    RFParams_PAL_VHS["rf_eq_fm_band"] = (1.2e6, 6.5e6)
+    # Band the response model is fitted in, only bins with enough coherence are used.
+    RFParams_PAL_VHS["rf_eq_fit_band"] = (2.0e6, 6.3e6)
+    # The fit has to cover at least sync tip to above white with some sideband on either side
+    # to be trusted.
+    RFParams_PAL_VHS["rf_eq_min_fit_range"] = (2.5e6, 5.3e6)
+    RFParams_PAL_VHS["rf_eq_ref_freq"] = 4.3e6
+    # Slope of the typical channel response the fixed rf filters are used with, in dB/MHz.
+    # Median of measurements of 15 PAL VHS SP/LP captures from several decks
+    # (range -1.6 to -4.2 dB/MHz).
+    RFParams_PAL_VHS["rf_eq_reference_slope"] = -2.69
+    RFParams_PAL_VHS["rf_eq_max_boost_db"] = 6.0
+    RFParams_PAL_VHS["rf_eq_max_cut_db"] = 6.0
+
     # Parameters for high-pass filter used for non-linear deemphasis, these are
     # probably not correct.
     # RFParams_PAL_VHS["nonlinear_highpass_freq"] = 600000

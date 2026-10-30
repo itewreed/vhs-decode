@@ -1,3 +1,4 @@
+import logging
 import os
 import time
 import numpy as np
@@ -22,6 +23,7 @@ import vhsdecode.formats as vhs_formats
 
 from vhsdecode.addons.chromasep import ChromaSepClass
 from vhsdecode.addons.chromaAFC import ChromaAFC
+from vhsdecode.addons import adaptive_rf_eq
 
 from vhsdecode.demod import replace_spikes, unwrap_hilbert, smooth_spikes
 
@@ -48,6 +50,13 @@ from vhsdecode import compute_video_filters as cvf
 from vhsdecode.demodcache import DemodCacheTape
 from vhsdecode.rust_utils import sosfiltfilt_rust
 from vhsdecode.dbwriter import DBWriter
+
+
+# Number of samples (at 40 MHz) read to measure the channel response for the adaptive rf eq.
+ADAPTIVE_RF_EQ_READ_LEN = 1 << 22
+# ldd.logger is only set up once a decoder is created, use the same logger directly so
+# the rf decoder can also be used on its own.
+_rf_eq_logger = logging.getLogger("lddecode")
 
 
 def is_secam(system: str):
@@ -202,6 +211,16 @@ class VHSDecode(ldd.LDdecode):
         # self.output_lines = (self.rf.SysParams["frame_lines"] // 2) + 1
         # Not modified as of now but may be tweaked for 405-line later
         # self.outwidth = self.rf.SysParams["outlinelen"]
+
+    def adapt_rf_eq(self, target="reference"):
+        """Measure the playback channel response from the rf data at the current position
+        and adapt the rf filter to it, see VHSRFDecode.adapt_rf_eq."""
+        # Kept short enough that the streaming loaders can still seek back to the start afterwards.
+        rf_data = self.freader(self.infile, self.fdoffset, ADAPTIVE_RF_EQ_READ_LEN)
+        if rf_data is None:
+            ldd.logger.warning("Adaptive rf eq: could not read rf data, using fixed filters.")
+            return None
+        return self.rf.adapt_rf_eq(rf_data, target)
 
     # Override to avoid NaN in JSON.
     def calcsnr(self, f, snrslice, psnr=False):
@@ -842,6 +861,9 @@ class VHSRFDecode(ldd.RFDecode):
 
         self.debug_plot = debug_plot
 
+        # Correction applied on top of the rf filter by the adaptive rf eq, if enabled.
+        self._rf_eq_correction = None
+
         # Lastly we re-create the filters with the new parameters.
         self._computevideofilters_b()
 
@@ -1105,6 +1127,10 @@ class VHSRFDecode(ldd.RFDecode):
             else:
                 self.Filters["RFVideo"] = abs(y_fm_lowpass) * abs(y_fm_highpass)
 
+        # Keep track of the equalization part of the rf filter (as opposed to the band limiting)
+        # so the adaptive rf eq can replace it.
+        rf_video_eq = np.ones(len(self.Filters["RFVideo"]))
+
         if DP.get("video_rf_peak_freq", False):
             # Add optional rf peaking filter
             from vhsdecode.addons.biquad import peaking
@@ -1119,6 +1145,7 @@ class VHSRFDecode(ldd.RFDecode):
                 self.blocklen,
             )
             self.Filters["RFVideo"] *= abs(peaking_filter)
+            rf_video_eq *= abs(peaking_filter)
 
         # b, a = ([1, -1], [1])
         # rf_eq = filtfft((b, a), self.blocklen)
@@ -1156,8 +1183,15 @@ class VHSRFDecode(ldd.RFDecode):
             )
 
             self.Filters["RFVideo"] *= ramp
+            rf_video_eq *= ramp
             if DP.get("boost_rf_linear_double", False):
                 self.Filters["RFVideo"] *= ramp
+                rf_video_eq *= ramp
+
+        self.Filters["RFVideoEQ"] = rf_video_eq
+        self.Filters["RFVideoFixed"] = self.Filters["RFVideo"].copy()
+        if self._rf_eq_correction is not None:
+            self.Filters["RFVideo"] *= self._rf_eq_correction
 
         self.Filters["RFTop"] = sps.butter(
             1,
@@ -1260,6 +1294,57 @@ class VHSRFDecode(ldd.RFDecode):
             from vhsdecode.debug_plot import plot_deemphasis
 
             plot_deemphasis(self, filter_video_lpf, DP, filter_deemp)
+
+    def adapt_rf_eq(self, rf_data, target="reference"):
+        """Measure the playback channel response from a stretch of rf data and adjust the
+        rf filter for it.
+
+        target "reference": correct for the difference between the measured response and the
+        typical response the fixed rf filters of the format were tuned for.
+        target "flat": replace the fixed rf eq (peaking and ramp filters) by the inverse of the
+        measured response, so the band-limited channel is flat.
+
+        Returns the channel estimate, or None if the measurement was not usable, in which case
+        the filters are left unchanged.
+        """
+        DP = self.DecoderParams
+        if DP.get("rf_eq_reference_slope", None) is None:
+            _rf_eq_logger.warning(
+                "Adaptive rf eq is not supported for this format, using fixed filters."
+            )
+            return None
+
+        estimate = adaptive_rf_eq.measure_channel(rf_data, self.freq_hz, DP)
+        min_low, min_high = DP["rf_eq_min_fit_range"]
+        if (
+            estimate is None
+            or estimate.fit_low > min_low
+            or estimate.fit_high < min_high
+        ):
+            _rf_eq_logger.warning(
+                "Adaptive rf eq: rf signal not usable for measuring the channel response, using fixed filters."
+            )
+            return None
+
+        _rf_eq_logger.info("Adaptive rf eq: %s", adaptive_rf_eq.describe(estimate, DP))
+
+        if target == "flat":
+            flat_params = {**DP, "rf_eq_reference_slope": 0.0}
+            correction = adaptive_rf_eq.gen_correction_filter(
+                estimate, flat_params, self.freq_hz, self.blocklen
+            )
+            fixed_eq = self.Filters["RFVideoEQ"]
+            # Divide out the fixed eq; where it is zero, the band limiting already is too.
+            with np.errstate(divide="ignore", invalid="ignore"):
+                correction = np.where(fixed_eq > 1e-6, correction / fixed_eq, 0.0)
+        else:
+            correction = adaptive_rf_eq.gen_correction_filter(
+                estimate, DP, self.freq_hz, self.blocklen
+            )
+
+        self._rf_eq_correction = correction
+        self.Filters["RFVideo"] = self.Filters["RFVideoFixed"] * correction
+        return estimate
 
     def computedelays(self, mtf_level=0):
         """Override computedelays
