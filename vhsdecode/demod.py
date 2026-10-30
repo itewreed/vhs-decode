@@ -92,11 +92,24 @@ class ColorUnderCrosstalkCanceller:
     it doesn't correlate with the lower luma FM sidebands. Fit and correction
     are done directly on the spectrum, limited to the bins the references
     occupy, so luma outside those bands isn't touched.
+
+    Picture content with strong luma in those bands (gratings/multiburst on
+    test cards) can correlate with the reference by chance and the fit would
+    then remove real luma. Real crosstalk is bounded by the colour-under
+    level: its frequency deviation is roughly coupling * (colour-under level
+    / RF level) * colour-under frequency, with the coupling below ~1 on real
+    tapes (~0.1 typical on saturated colours) while bogus fits on luma
+    content reach 10 or more. The correction is faded out smoothly above
+    max_coupling.
     """
 
-    def __init__(self, color_under_hz, freq_hz, blocklen, ref_bw_hz=150e3):
+    def __init__(
+        self, color_under_hz, freq_hz, blocklen, ref_bw_hz=150e3, max_coupling=2.0
+    ):
         n = blocklen
         self.blocklen = n
+        self.color_under_hz = color_under_hz
+        self.max_coupling = max_coupling
         k0 = int(round(color_under_hz * n / freq_hz))
         half = int(np.ceil(1.7 * ref_bw_hz * n / freq_hz))
         self.ref_bins = np.arange(k0 - half, k0 + half + 1)
@@ -116,9 +129,10 @@ class ColorUnderCrosstalkCanceller:
         self.sq_pos = sq_bins - self.bins[0]
         self.deriv = 1j * self.bins / n
 
-    def crosstalk_spectrum(self, demod_fft, ref_band_fft):
+    def crosstalk_spectrum(self, demod_fft, ref_band_fft, rf_rms):
         """Return the estimated crosstalk as rfft bins (see self.bins) of demod.
-        ref_band_fft is the fft of the raw rf data of the same block at ref_bins."""
+        ref_band_fft is the fft of the raw rf data of the same block at ref_bins,
+        rf_rms the rms level of that raw rf block."""
         ref_spec = ref_band_fft * self.ref_mask
 
         small = np.zeros(self.small_len, dtype=np.complex128)
@@ -142,6 +156,19 @@ class ColorUnderCrosstalkCanceller:
         gram = np.einsum("ki,kj->ij", regressors.conj(), regressors)
         rhs = np.einsum("ki,k->i", regressors.conj(), target)
         coef = _solve_small(gram, rhs)
-        return z_full * (coef[0] + coef[1] * self.deriv) + sq_full * (
-            coef[2] + coef[3] * self.deriv
+
+        # Coupling implied by the fit (see class docstring), rms values via
+        # Parseval over the positive frequency bins, the 2/n^2 cancels out.
+        est_energy = max(np.vdot(coef, gram @ coef).real, 0.0)
+        ref_energy = np.vdot(ref_spec, ref_spec).real
+        coupling = (
+            np.sqrt(est_energy / max(ref_energy, 1e-300))
+            * rf_rms
+            / self.color_under_hz
+        )
+        weight = 1.0 / (1.0 + (coupling / self.max_coupling) ** 4)
+
+        return weight * (
+            z_full * (coef[0] + coef[1] * self.deriv)
+            + sq_full * (coef[2] + coef[3] * self.deriv)
         )
