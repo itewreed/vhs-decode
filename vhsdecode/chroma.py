@@ -175,37 +175,6 @@ def comb_c_ntsc(data, line_len):
     return data
 
 
-<<<<<<< HEAD
-@jitclass({
-    'line_number': numba.int32,
-    'start': numba.int32,
-    'end': numba.int32,
-    'phase_deg': numba.float64,
-    'phase_offset_deg': numba.float64,
-    'amplitude': numba.float64,
-    'magnitude': numba.float64,
-    'frequency': numba.float64,
-    'dc': numba.float64,
-    'I': numba.float64,
-    'Q': numba.float64,
-    'phase_rotation': numba.int8,
-    'phase_correction': numba.float64,
-})
-class BurstInfo:
-    line_number: int
-    start: int
-    end: int
-    center: int
-    phase_deg: float
-    amplitude: float
-    magnitude: float
-    frequency: float
-    dc: float
-    I: float
-    Q: float
-    phase_rotation: int
-    phase_correction: float
-=======
 class BurstInfo:
     # Plain Python class instead of a numba jitclass: jitclass arguments block
     # caching of every njit function they are passed to. The numba kernels below
@@ -224,8 +193,8 @@ class BurstInfo:
         "I",
         "Q",
         "phase_rotation",
+        "phase_correction",
     )
->>>>>>> performance-optimizations
 
     def __init__(
         self,
@@ -260,12 +229,13 @@ class BurstInfo:
 
 def burst_info_arrays(phase_sequence):
     """Pack the fields used by the numba kernels into arrays:
-    (line_number, start, phase_rotation, amplitude, frequency, phase_deg, dc)"""
+    (line_number, start, phase_rotation, amplitude, frequency, phase_deg, dc,
+    phase_correction)"""
     n = len(phase_sequence)
     line_number = np.empty(n, dtype=np.int64)
     start = np.empty(n, dtype=np.int64)
     phase_rotation = np.empty(n, dtype=np.int64)
-    values = np.empty((4, n), dtype=np.float64)
+    values = np.empty((5, n), dtype=np.float64)
     for i, burst in enumerate(phase_sequence):
         line_number[i] = burst.line_number
         start[i] = burst.start
@@ -274,7 +244,8 @@ def burst_info_arrays(phase_sequence):
         values[1, i] = burst.frequency
         values[2, i] = burst.phase_deg
         values[3, i] = burst.dc
-    return line_number, start, phase_rotation, values[0], values[1], values[2], values[3]
+        values[4, i] = burst.phase_correction
+    return line_number, start, phase_rotation, values[0], values[1], values[2], values[3], values[4]
 
 
 @njit(nogil=True, inline='always')
@@ -1015,6 +986,7 @@ def upconvert_chroma(
     outwidth,
     burst_line_numbers,
     burst_phase_rotations,
+    burst_phase_corrections,
     chroma_heterodyne,
 ):
     for i in range(len(burst_line_numbers)):
@@ -1023,12 +995,13 @@ def upconvert_chroma(
 
         heterodyne = chroma_heterodyne[burst_phase_rotations[i]][linestart:lineend]
         c = chroma[linestart:lineend]
-        if burst.phase_correction != 0.0:
+        phase_correction = burst_phase_corrections[i]
+        if phase_correction != 0.0:
             # the next heterodyne phase is 90 degrees further, mix both for the fractional step
-            quadrature = chroma_heterodyne[(burst.phase_rotation + 1) % 4][linestart:lineend]
+            quadrature = chroma_heterodyne[(burst_phase_rotations[i] + 1) % 4][linestart:lineend]
             uphet[linestart:lineend] = c * (
-                heterodyne * math.cos(burst.phase_correction)
-                + quadrature * math.sin(burst.phase_correction)
+                heterodyne * math.cos(phase_correction)
+                + quadrature * math.sin(phase_correction)
             )
         else:
             uphet[linestart:lineend] = c * heterodyne
@@ -2139,6 +2112,7 @@ def process_chroma(
         burst_frequencies,
         burst_phase_degs,
         burst_dcs,
+        burst_phase_corrections,
     ) = burst_info_arrays(field.phase_sequence)
 
     # For NTSC, the color burst amplitude is doubled when recording, so we have to undo that.
@@ -2214,6 +2188,7 @@ def process_chroma(
             outwidth,
             burst_line_numbers,
             burst_phase_rotations,
+            burst_phase_corrections,
             chroma_heterodyne
         )
 
