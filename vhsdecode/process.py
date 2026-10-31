@@ -28,6 +28,7 @@ from vhsdecode.demod import (
     unwrap_hilbert,
     smooth_spikes,
     ColorUnderCrosstalkCanceller,
+    complex_energy,
 )
 
 from vhsdecode.field import field_class_from_formats
@@ -1336,7 +1337,7 @@ class VHSRFDecode(ldd.RFDecode):
             else None
         )
         cu_rf_rms = (
-            np.sqrt(np.vdot(indata_fft, indata_fft).real) / self.blocklen
+            np.sqrt(complex_energy(indata_fft)) / self.blocklen
             if self._cu_canceller is not None
             else None
         )
