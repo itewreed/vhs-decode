@@ -1335,6 +1335,11 @@ class VHSRFDecode(ldd.RFDecode):
             if self._cu_canceller is not None
             else None
         )
+        cu_rf_rms = (
+            np.sqrt(np.vdot(indata_fft, indata_fft).real) / self.blocklen
+            if self._cu_canceller is not None
+            else None
+        )
 
         # Applies RF filters
         indata_fft *= self.Filters["RFVideo"]
@@ -1417,7 +1422,9 @@ class VHSRFDecode(ldd.RFDecode):
             # using the unmodified signal so line timing isn't affected.
             video_fft = demod_fft.copy()
             video_fft[self._cu_canceller.bins] -= (
-                self._cu_canceller.crosstalk_spectrum(demod_fft, cu_ref_fft)
+                self._cu_canceller.crosstalk_spectrum(
+                    demod_fft, cu_ref_fft, cu_rf_rms
+                )
             )
             out_video_fft = video_fft * self.Filters["FVideo"]
         else:
