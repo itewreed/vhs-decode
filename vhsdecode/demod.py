@@ -74,6 +74,16 @@ def _solve_small(a, b):
     return x
 
 
+@njit(cache=True, nogil=True)
+def complex_energy(x):
+    """Sum of |x|^2, single threaded (np.vdot goes to the multi-threaded BLAS
+    and makes the decoder threads spin on all cores)."""
+    acc = 0.0
+    for v in x:
+        acc += v.real * v.real + v.imag * v.imag
+    return acc
+
+
 class ColorUnderCrosstalkCanceller:
     """Remove colour-under crosstalk from the demodulated luma signal.
 
@@ -159,8 +169,9 @@ class ColorUnderCrosstalkCanceller:
 
         # Coupling implied by the fit (see class docstring), rms values via
         # Parseval over the positive frequency bins, the 2/n^2 cancels out.
-        est_energy = max(np.vdot(coef, gram @ coef).real, 0.0)
-        ref_energy = np.vdot(ref_spec, ref_spec).real
+        # einsum instead of vdot/@ to stay off BLAS, see above.
+        est_energy = max(np.einsum("i,ij,j->", coef.conj(), gram, coef).real, 0.0)
+        ref_energy = complex_energy(ref_spec)
         coupling = (
             np.sqrt(est_energy / max(ref_energy, 1e-300))
             * rf_rms
